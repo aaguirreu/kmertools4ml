@@ -203,7 +203,7 @@ pub struct MinimiserCommand {
 // COUNTER
 #[derive(Debug, Args)]
 pub struct CounterCommand {
-    /// Input file path
+    /// Input file or directory path
     #[arg(short, long)]
     pub input: String,
 
@@ -344,17 +344,37 @@ pub fn cli(cli: Cli) {
         }
         Commands::Ctr(command) => {
             create_directory(&command.output).unwrap();
-            let mut ctr =
-                counter::CountComputer::new(command.input, command.output, command.k_size as usize);
-            if command.threads > 0 {
-                ctr.set_threads(command.threads);
+            let meta = std::fs::metadata(&command.input).expect("Cannot read metadata.");
+            if meta.is_dir() {
+                for entry in std::fs::read_dir(&command.input).unwrap() {
+                    let path = entry.unwrap().path();
+                    let mut ctr = counter::CountComputer::new(
+                        path.to_str().unwrap().to_owned(),
+                        command.output.clone(),
+                        command.k_size as usize,
+                    );
+                    if command.threads > 0 {
+                        ctr.set_threads(command.threads);
+                    }
+                    if command.acgt {
+                        ctr.set_acgt_output(true);
+                    }
+                    ctr.set_max_memory(command.memory as f64);
+                    ctr.count();
+                    ctr.merge(true);
+                }
+            } else {
+                let mut ctr = counter::CountComputer::new(command.input, command.output, command.k_size as usize);
+                if command.threads > 0 {
+                    ctr.set_threads(command.threads);
+                }
+                if command.acgt {
+                    ctr.set_acgt_output(true);
+                }
+                ctr.set_max_memory(command.memory as f64);
+                ctr.count();
+                ctr.merge(true);
             }
-            if command.acgt {
-                ctr.set_acgt_output(true);
-            }
-            ctr.set_max_memory(command.memory as f64);
-            ctr.count();
-            ctr.merge(true);
         }
     }
 }

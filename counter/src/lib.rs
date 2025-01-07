@@ -160,7 +160,7 @@ impl CountComputer {
                     .unwrap();
                     let mut buff = BufWriter::new(outf);
                     map.scan(|k, v| {
-                        buff.write_all(format!("{}\t{:?}\n", k, v).as_bytes())
+                        buff.write_all(format!("{}\t{}\n", v, k).as_bytes())
                             .unwrap();
                     });
                 })
@@ -204,8 +204,8 @@ impl CountComputer {
                         let buff = BufReader::new(file);
                         for line in buff.lines().map_while(Result::ok) {
                             let mut parts = line.trim().split('\t');
-                            let kmer: Kmer = parts.next().unwrap().parse().unwrap();
                             let count: u32 = parts.next().unwrap().parse().unwrap();
+                            let kmer: Kmer = parts.next().unwrap().parse().unwrap();
                             *map_arc_clone.entry(kmer).or_insert(0) += count;
                         }
                         if delete {
@@ -220,11 +220,11 @@ impl CountComputer {
             map_arc.scan(|k, v| {
                 if self.acgt {
                     buff.write_all(
-                        format!("{}\t{:?}\n", numeric_to_kmer(*k, self.ksize), v).as_bytes(),
+                        format!("{}\t{}\n", v, numeric_to_kmer(*k, self.ksize)).as_bytes(),
                     )
                     .unwrap();
                 } else {
-                    buff.write_all(format!("{}\t{:?}\n", k, v).as_bytes())
+                    buff.write_all(format!("{}\t{}\n", v, k).as_bytes())
                         .unwrap();
                 }
             });

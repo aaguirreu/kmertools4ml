@@ -1,0 +1,36 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'kmertools'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=kmertools",
+                    "--package=kmertools"
+                ],
+                "filter": {
+                    "name": "kmertools",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "ctr",
+                "--input",
+                // "D:\\Titulo\\Genomes\\GCF_000020825.1_ASM2082v1_genomic.fna",
+                "D:\\Titulo\\Genomes",
+                "--k-size",
+                "10",
+                "--output",
+                ".\\",
+                "--acgt"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+    ]
+}
