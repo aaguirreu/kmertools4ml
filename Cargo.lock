@@ -549,8 +549,20 @@ dependencies = [
  "composition",
  "counter",
  "coverage",
+ "kml",
  "ktio",
  "misc",
+]
+
+[[package]]
+name = "kml"
+version = "0.1.5"
+dependencies = [
+ "indicatif",
+ "kmer",
+ "ktio",
+ "rayon",
+ "scc",
 ]
 
 [[package]]

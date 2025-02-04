@@ -1,14 +1,22 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use kmer::{kmer::KmerGenerator, numeric_to_kmer, Kmer};
-use ktio::seq::{get_reader, SeqFormat, Sequences};
+use ktio::{
+    fops::delete_file_if_exists,
+    seq::{get_reader, SeqFormat, Sequences},
+};
+use rayon::prelude::*;
+use scc::HashMap as SccMap;
 use std::{
     cmp::{max, min},
-    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, BufWriter, Read, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
+// only to make code more readable
 type SeqArc = Arc<Mutex<Sequences<BufReader<Box<dyn Read + Sync + Send>>>>>;
 
 pub struct CountComputer {
@@ -23,7 +31,6 @@ pub struct CountComputer {
     seq_count: u64,
     debug: bool,
     acgt: bool,
-    genome_ids: Arc<Mutex<Vec<String>>>,
 }
 
 impl CountComputer {
@@ -44,7 +51,6 @@ impl CountComputer {
             memory_ceil_gb: 6_f64,
             debug: false,
             acgt: false,
-            genome_ids: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -70,135 +76,170 @@ impl CountComputer {
             .unwrap()
             .progress_chars("#>-"),
         );
+        loop {
+            // TODO have to fix below line being called even the next chunk does not exist
+            pbar.set_message(format!("Processing chunk: {}", self.chunks + 1));
+            let records = self.count_chunk(&pbar);
+            if records > 0 {
+                self.chunks += 1;
+            } else {
+                break;
+            }
+        }
+        pbar.finish();
+    }
 
-        // Wrap pbar en Arc<Mutex<>> para compartir entre hilos
-        let pbar_arc = Arc::new(Mutex::new(pbar));
-
-        let pool = rayon::ThreadPoolBuilder::new()
+    fn count_chunk(&self, pbar: &ProgressBar) -> u64 {
+        let pool: rayon::ThreadPool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.threads)
             .build()
             .unwrap();
-
-        let records_clone = Arc::clone(&self.records);
-        let genome_ids_clone = Arc::clone(&self.genome_ids);
-        let pbar_clone = Arc::clone(&pbar_arc); // Clone para el hilo
+        let total_records = Arc::new(AtomicU64::new(0));
+        // an estimate of worse case kmer count
+        let total_kmers_so_far = Arc::new(AtomicU64::new(0));
+        let counts_table: Vec<SccMap<Kmer, u32>> = vec![SccMap::new(); self.n_parts as usize];
+        let counts_table_arc = Arc::new(counts_table);
+        // make pbar for all bases struct wide
 
         pool.scope(|scope| {
-            scope.spawn(move |_| {
-                while let Some(record) = records_clone.lock().unwrap().next() {
-                    pbar_clone.lock().unwrap().inc(1); // Acceso seguro al progress bar
+            for _ in 0..self.threads {
+                let records_arc_clone = Arc::clone(&self.records);
+                let total_records_clone = Arc::clone(&total_records);
+                let counts_table_arc_clone = Arc::clone(&counts_table_arc);
+                let total_kmers_so_far_clone = Arc::clone(&total_kmers_so_far);
 
-                    // Usar record.id en lugar de record.header
-                    let genome_id = record.id.split_whitespace().next().unwrap().to_string();
-                    genome_ids_clone.lock().unwrap().push(genome_id);
+                scope.spawn(move |_| {
+                    loop {
+                        // when limit reached exit without further reads
+                        if total_kmers_so_far_clone.load(Ordering::Relaxed)
+                            > (1_000_000_000_f64 * self.memory_ceil_gb / 8.0) as u64
+                        {
+                            break;
+                        }
+                        let record = { records_arc_clone.lock().unwrap().next() };
+                        if let Some(record) = record {
+                            pbar.inc(1);
+                            total_records_clone.fetch_add(1, Ordering::Acquire);
+                            for (fmer, rmer) in KmerGenerator::new(&record.seq, self.ksize) {
+                                let min_mer = min(fmer, rmer);
+                                unsafe {
+                                    counts_table_arc_clone
+                                        .get_unchecked((min_mer % self.n_parts) as usize)
+                                        .entry(min_mer)
+                                        .and_modify(|v| *v += 1)
+                                        .or_insert(1);
+                                }
+                            }
 
-                    let mut part_counts = vec![HashMap::new(); self.n_parts as usize];
-
-                    for (fmer, rmer) in KmerGenerator::new(&record.seq, self.ksize) {
-                        let min_mer = min(fmer, rmer);
-                        let part = (min_mer % self.n_parts) as usize;
-                        *part_counts[part].entry(min_mer).or_insert(0) += 1;
-                    }
-
-                    let chunk = self.chunks;
-                    self.chunks += 1;
-
-                    for (part, counts) in part_counts.into_iter().enumerate() {
-                        let path = format!(
-                            "{}/temp_kmers.part_{}_chunk_{}",
-                            self.out_dir, part, chunk
-                        );
-                        let mut buff = BufWriter::new(fs::File::create(path).unwrap());
-                        for (kmer, count) in counts {
-                            writeln!(buff, "{}\t{}", count, kmer).unwrap();
+                            total_kmers_so_far_clone
+                                .fetch_add(record.seq.len() as u64, Ordering::Relaxed);
+                        } else {
+                            // end of iteration
+                            break;
                         }
                     }
-                }
-            });
+                });
+            }
         });
 
-        pbar_arc.lock().unwrap().finish(); // Finalizar desde el hilo principal
+        let recs = total_records.load(Ordering::Acquire);
+
+        if recs == 0 {
+            return 0;
+        }
+
+        pool.scope(|_| {
+            counts_table_arc
+                .par_iter()
+                .enumerate()
+                .for_each(|(part, map)| {
+                    let outf = fs::File::create(format!(
+                        "{}/temp_kmers.part_{}_chunk_{}",
+                        self.out_dir, part, self.chunks
+                    ))
+                    .unwrap();
+                    let mut buff = BufWriter::new(outf);
+                    map.scan(|k, v| {
+                        buff.write_all(format!("{}\t{:?}\n", k, v).as_bytes())
+                            .unwrap();
+                    });
+                })
+        });
+
+        total_records.load(Ordering::Acquire)
     }
 
     pub fn merge(&self, delete: bool) {
-        let genome_ids = self.genome_ids.lock().unwrap().clone();
+        let pool: rayon::ThreadPool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.threads)
+            .build()
+            .unwrap();
         let outf = fs::File::create(format!("{}/kmers.counts", self.out_dir)).unwrap();
         let mut buff = BufWriter::new(outf);
+        let pbar = ProgressBar::new(self.n_parts * self.chunks);
+        pbar.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} ({percent}%) {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
 
-        // Colectar todos los k-mers únicos
-        let mut all_kmers = HashSet::new();
-        for chunk in 0..genome_ids.len() {
-            for part in 0..self.n_parts {
-                let path = format!(
-                    "{}/temp_kmers.part_{}_chunk_{}",
-                    self.out_dir, part, chunk
-                );
-                if let Ok(file) = fs::File::open(&path) {
-                    let buff = BufReader::new(file);
-                    for line in buff.lines().filter_map(Result::ok) {
-                        let kmer: Kmer = line.split('\t').nth(1).unwrap().parse().unwrap();
-                        all_kmers.insert(kmer);
-                    }
+        for part in 0..self.n_parts {
+            let completed = Arc::new(AtomicU64::new(0));
+            let map: SccMap<Kmer, u32> = SccMap::new();
+            let map_arc = Arc::new(map);
+            pbar.set_message(format!("Merging partition: {}", part + 1));
+
+            pool.scope(|scope| {
+                for chunk in 0..self.chunks {
+                    let map_arc_clone = Arc::clone(&map_arc);
+                    let pbar_clone = pbar.clone();
+                    let completed_clone = Arc::clone(&completed);
+
+                    scope.spawn(move |_| {
+                        let path =
+                            format!("{}/temp_kmers.part_{}_chunk_{}", self.out_dir, part, chunk);
+                        let file = fs::File::open(&path).unwrap();
+                        let buff = BufReader::new(file);
+                        for line in buff.lines().map_while(Result::ok) {
+                            let mut parts = line.trim().split('\t');
+                            let kmer: Kmer = parts.next().unwrap().parse().unwrap();
+                            let count: u32 = parts.next().unwrap().parse().unwrap();
+                            *map_arc_clone.entry(kmer).or_insert(0) += count;
+                        }
+                        if delete {
+                            delete_file_if_exists(&path).expect("file must be removable");
+                        }
+                        completed_clone.fetch_add(1, Ordering::Acquire);
+                        pbar_clone.inc(1);
+                    });
                 }
-            }
+            });
+
+            map_arc.scan(|k, v| {
+                if self.acgt {
+                    buff.write_all(
+                        format!("{}\t{:?}\n", numeric_to_kmer(*k, self.ksize), v).as_bytes(),
+                    )
+                    .unwrap();
+                } else {
+                    buff.write_all(format!("{}\t{:?}\n", k, v).as_bytes())
+                        .unwrap();
+                }
+            });
         }
 
-        // Ordenar k-mers y escribir encabezado
-        let mut sorted_kmers: Vec<Kmer> = all_kmers.into_iter().collect();
-        sorted_kmers.sort_unstable();
-        write!(buff, "ID_Genome").unwrap();
-        for kmer in &sorted_kmers {
-            let kmer_str = if self.acgt {
-                numeric_to_kmer(*kmer, self.ksize)
-            } else {
-                kmer.to_string()
-            };
-            write!(buff, "\t{}", kmer_str).unwrap();
-        }
-        writeln!(buff).unwrap();
-
-        // Escribir conteos por genoma
-        for (chunk, genome_id) in genome_ids.iter().enumerate() {
-            let mut genome_counts = HashMap::new();
-            for part in 0..self.n_parts {
-                let path = format!(
-                    "{}/temp_kmers.part_{}_chunk_{}",
-                    self.out_dir, part, chunk
-                );
-                if let Ok(file) = fs::File::open(&path) {
-                    let buff = BufReader::new(file);
-                    for line in buff.lines().filter_map(Result::ok) {
-                        let mut parts = line.split('\t');
-                        let count: u32 = parts.next().unwrap().parse().unwrap();
-                        let kmer: Kmer = parts.next().unwrap().parse().unwrap();
-                        genome_counts.insert(kmer, count);
-                    }
-                }
-            }
-
-            write!(buff, "{}", genome_id).unwrap();
-            for kmer in &sorted_kmers {
-                write!(buff, "\t{}", genome_counts.get(kmer).unwrap_or(&0)).unwrap();
-            }
-            writeln!(buff).unwrap();
-
-            if delete {
-                for part in 0..self.n_parts {
-                    let path = format!(
-                        "{}/temp_kmers.part_{}_chunk_{}",
-                        self.out_dir, part, chunk
-                    );
-                    fs::remove_file(path).ok();
-                }
-            }
-        }
+        pbar.finish();
     }
 
-    fn init(&mut self) {
+    pub fn init(&mut self) {
         let reader = get_reader(&self.in_path).unwrap();
         let format = SeqFormat::get(&self.in_path).unwrap();
         let stats = Sequences::seq_stats(format, reader);
         let data_size_gb = stats.total_length as f64 / (1 << 30) as f64;
+        // assuming 8 bytes per kmer
+        // at least this should be the num threads for fastest possible merging
         let n_parts = max(
             if self.debug { 1 } else { self.threads as u64 },
             (8_f64 * data_size_gb / (2_f64 * self.memory_ceil_gb)).ceil() as u64,

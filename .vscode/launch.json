@@ -22,8 +22,7 @@
             "args": [
                 "ctr",
                 "--input",
-                // "D:\\Titulo\\Genomes\\GCF_000020825.1_ASM2082v1_genomic.fna",
-                "D:\\Titulo\\Genomes",
+                "./GenomicFNA_jul/1A_Fervidacithiobacillus_caldus_6.fna",
                 "--k-size",
                 "10",
                 "--output",

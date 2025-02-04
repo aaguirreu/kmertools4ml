@@ -56,6 +56,8 @@ pub enum Commands {
     Min(MinimiserCommand),
     /// Count k-mers
     Ctr(CounterCommand),
+    /// Count k-mers but concatenates all sequences
+    Kml(KmlCommand),
 }
 
 // COMPOSITION
@@ -231,6 +233,37 @@ pub struct CounterCommand {
     pub threads: usize,
 }
 
+#[derive(Debug, Args)]
+pub struct KmlCommand {
+    /// Input file path
+    #[arg(short, long)]
+    pub input: String,
+
+    /// Output directory path
+    #[arg(short, long)]
+    pub output: String,
+
+    /// k size for counting
+    #[arg(short, long, value_parser = clap::value_parser!(u64).range(10..32))]
+    pub k_size: u64,
+
+    /// Max memory in GB
+    #[arg(short, long, value_parser = clap::value_parser!(u64).range(6..=128), default_value_t = 6)]
+    pub memory: u64,
+
+    /// Output ACGT instead of numeric values
+    ///
+    /// This requires a larger space for the final result
+    /// compared to the compact numeric representation
+    #[arg(short, long, verbatim_doc_comment)]
+    pub acgt: bool,
+
+    /// Thread count for computations 0=auto
+    #[arg(short, long, default_value_t = 0)]
+    pub threads: usize,
+}
+
+
 #[cfg(not(tarpaulin_include))]
 pub fn cli(cli: Cli) {
     match cli.command {
@@ -344,36 +377,55 @@ pub fn cli(cli: Cli) {
         }
         Commands::Ctr(command) => {
             create_directory(&command.output).unwrap();
+            let mut ctr =
+                counter::CountComputer::new(command.input, command.output, command.k_size as usize);
+            if command.threads > 0 {
+                ctr.set_threads(command.threads);
+            }
+            if command.acgt {
+                ctr.set_acgt_output(true);
+            }
+            ctr.set_max_memory(command.memory as f64);
+            ctr.count();
+            ctr.merge(true);
+        }
+        Commands::Kml(command) => {
+            create_directory(&command.output).unwrap();
             let meta = std::fs::metadata(&command.input).expect("Cannot read metadata.");
             if meta.is_dir() {
                 for entry in std::fs::read_dir(&command.input).unwrap() {
                     let path = entry.unwrap().path();
-                    let mut ctr = counter::CountComputer::new(
+                    // Utiliza el módulo `kml` en lugar de `counter`
+                    let mut kml_processor = kml::CountComputer::new(
                         path.to_str().unwrap().to_owned(),
                         command.output.clone(),
                         command.k_size as usize,
                     );
                     if command.threads > 0 {
-                        ctr.set_threads(command.threads);
+                        kml_processor.set_threads(command.threads);
                     }
                     if command.acgt {
-                        ctr.set_acgt_output(true);
+                        kml_processor.set_acgt_output(true);
                     }
-                    ctr.set_max_memory(command.memory as f64);
-                    ctr.count();
-                    ctr.merge(true);
+                    kml_processor.set_max_memory(command.memory as f64);
+                    kml_processor.count();
+                    kml_processor.merge(true);
                 }
             } else {
-                let mut ctr = counter::CountComputer::new(command.input, command.output, command.k_size as usize);
+                let mut kml_processor = kml::CountComputer::new(
+                    command.input,
+                    command.output,
+                    command.k_size as usize,
+                );
                 if command.threads > 0 {
-                    ctr.set_threads(command.threads);
+                    kml_processor.set_threads(command.threads);
                 }
                 if command.acgt {
-                    ctr.set_acgt_output(true);
+                    kml_processor.set_acgt_output(true);
                 }
-                ctr.set_max_memory(command.memory as f64);
-                ctr.count();
-                ctr.merge(true);
+                kml_processor.set_max_memory(command.memory as f64);
+                kml_processor.count();
+                kml_processor.merge(true);
             }
         }
     }
