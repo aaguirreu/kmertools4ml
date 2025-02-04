@@ -35,7 +35,7 @@ To install `kmertools` (including the new KML functionality) from source, follow
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repository/kmertools.git
+git clone https://github.com/aaguirreu/kmertools4ml.git
 cd kmertools
 
 # Build the project in release mode
