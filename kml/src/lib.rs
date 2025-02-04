@@ -59,6 +59,7 @@ impl CountComputer {
         self.acgt = acgt;
     }
 
+    // Setter para asignar un chunk único desde fuera
     pub fn set_chunk(&mut self, chunk: u64) {
         self.chunks = chunk;
     }
@@ -66,11 +67,27 @@ impl CountComputer {
     pub fn count(&mut self) {
         self.init();
         let pbar = ProgressBar::new(self.seq_count);
-        pbar.set_style(ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} ({percent}%) {msg}").unwrap().progress_chars("#>-"));
+        pbar.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} ({percent}%) {msg}"
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
 
         let mut combined_seq = String::new();
+        let mut label = String::new();
         {
             let mut records = self.records.lock().unwrap();
+            // Procesamos el primer registro para extraer el label
+            if let Some(record) = records.next() {
+                let seq_str = std::str::from_utf8(&record.seq).unwrap();
+                combined_seq.push_str(seq_str);
+                // Se asume que record.description y record.id existen
+                label = record.desc.replace(&record.id, "").trim().to_string();
+                pbar.inc(1);
+            }
+            // Los registros restantes se concatenan sin modificar el label
             while let Some(record) = records.next() {
                 let seq_str = std::str::from_utf8(&record.seq).unwrap();
                 combined_seq.push_str(seq_str);
@@ -82,20 +99,21 @@ impl CountComputer {
         let chunk = self.chunks;
         self.chunks += 1;
 
+        // Se obtiene el genome_id (por ejemplo, a partir del nombre del archivo)
         let genome_id = Path::new(&self.in_path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
 
-        // Guardar el ID del genoma en genome_ids.txt
+        // Guardar el ID del genoma y el label en genome_ids.txt (separados por tabulador)
         let genome_ids_path = format!("{}/genome_ids.txt", self.out_dir);
         let mut file = File::options()
             .create(true)
             .append(true)
             .open(genome_ids_path)
             .unwrap();
-        writeln!(file, "{}", genome_id).unwrap();
+        writeln!(file, "{}\t{}", genome_id, label).unwrap();
 
         let mut part_counts = vec![HashMap::new(); self.n_parts as usize];
         for (fmer, rmer) in KmerGenerator::new(combined_seq.as_bytes(), self.ksize) {
@@ -111,7 +129,7 @@ impl CountComputer {
                 writeln!(buff, "{}\t{}", count, kmer).unwrap();
             }
         }
-    }        
+    }
 
     fn init(&mut self) {
         let reader = get_reader(&self.in_path).unwrap();
@@ -127,23 +145,35 @@ impl CountComputer {
     }
 }
 
-// Función independiente para fusionar todos los archivos temporales
+// Función independiente para fusionar todos los archivos temporales y generar el archivo final
 pub fn merge_all(out_dir: &str, ksize: usize, acgt: bool, delete: bool) {
+    // Leer el archivo genome_ids.txt, ahora con dos columnas: genome_id y label.
     let genome_ids_path = format!("{}/genome_ids.txt", out_dir);
-    let genome_ids = match fs::read_to_string(&genome_ids_path) {
-        Ok(content) => content.lines().map(String::from).collect::<Vec<_>>(),
+    let genome_records = match fs::read_to_string(&genome_ids_path) {
+        Ok(content) => {
+            content
+                .lines()
+                .map(|line| {
+                    let mut parts = line.split('\t');
+                    let genome_id = parts.next().unwrap_or("").to_string();
+                    let label = parts.next().unwrap_or("").to_string();
+                    (genome_id, label)
+                })
+                .collect::<Vec<_>>()
+        }
         Err(_) => Vec::new(),
     };
 
     let mut all_kmers = HashSet::new();
-    for chunk in 0..genome_ids.len() {
+    // Recorremos cada chunk (fila) usando el número de líneas en genome_ids.txt
+    for chunk in 0..genome_records.len() {
         let mut part = 0;
         loop {
             let path = format!("{}/temp_kmers.part_{}_chunk_{}", out_dir, part, chunk);
             if !Path::new(&path).exists() {
                 break;
             }
-            let file = File::open(path).unwrap();
+            let file = File::open(&path).unwrap();
             let reader = BufReader::new(file);
             for line in reader.lines().filter_map(Result::ok) {
                 let kmer: Kmer = line.split('\t').nth(1).unwrap().parse().unwrap();
@@ -159,8 +189,8 @@ pub fn merge_all(out_dir: &str, ksize: usize, acgt: bool, delete: bool) {
     let outf = File::create(format!("{}/kmers.counts", out_dir)).unwrap();
     let mut buff = BufWriter::new(outf);
 
-    // Escribir cabecera
-    write!(buff, "ID_Genome").unwrap();
+    // Escribir el header con las columnas: file, label, y luego los k-mers
+    write!(buff, "file\tlabel").unwrap();
     for kmer in &sorted_kmers {
         let kmer_str = if acgt {
             numeric_to_kmer(*kmer, ksize)
@@ -171,8 +201,8 @@ pub fn merge_all(out_dir: &str, ksize: usize, acgt: bool, delete: bool) {
     }
     writeln!(buff).unwrap();
 
-    // Escribir conteos por genoma
-    for (chunk, genome_id) in genome_ids.iter().enumerate() {
+    // Escribir los conteos por genoma, incluyendo genome_id y label
+    for (chunk, (genome_id, label)) in genome_records.iter().enumerate() {
         let mut genome_counts = HashMap::new();
         let mut part = 0;
         loop {
@@ -180,7 +210,7 @@ pub fn merge_all(out_dir: &str, ksize: usize, acgt: bool, delete: bool) {
             if !Path::new(&path).exists() {
                 break;
             }
-            let file = File::open(path).unwrap();
+            let file = File::open(&path).unwrap();
             let reader = BufReader::new(file);
             for line in reader.lines().filter_map(Result::ok) {
                 let mut parts = line.split('\t');
@@ -191,7 +221,7 @@ pub fn merge_all(out_dir: &str, ksize: usize, acgt: bool, delete: bool) {
             part += 1;
         }
 
-        write!(buff, "{}", genome_id).unwrap();
+        write!(buff, "{}\t{}", genome_id, label).unwrap();
         for kmer in &sorted_kmers {
             write!(buff, "\t{}", genome_counts.get(kmer).unwrap_or(&0)).unwrap();
         }

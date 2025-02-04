@@ -20,13 +20,13 @@
                 }
             },
             "args": [
-                "ctr",
+                "kml",
                 "--input",
-                "./GenomicFNA_jul/1A_Fervidacithiobacillus_caldus_6.fna",
+                "./GenomicFNA_jul_test/",
                 "--k-size",
                 "10",
                 "--output",
-                ".\\",
+                "./GenomicFNA_jul_test_results/",
                 "--acgt"
             ],
             "cwd": "${workspaceFolder}"

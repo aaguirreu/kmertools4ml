@@ -12,6 +12,7 @@ pub enum RecordSet<R: BufRead> {
 pub struct Sequence {
     pub n: usize,
     pub id: String,
+    pub desc: String,
     pub seq: Vec<u8>,
 }
 
@@ -109,6 +110,7 @@ impl<R: BufRead> Iterator for Sequences<R> {
                     return Some(Sequence {
                         n: self.current_record - 1,
                         id: record.id().to_string(),
+                        desc: record.desc().unwrap_or("").to_string(),
                         seq: record.seq().to_vec(),
                     });
                 }
@@ -122,6 +124,7 @@ impl<R: BufRead> Iterator for Sequences<R> {
                     return Some(Sequence {
                         n: self.current_record - 1,
                         id: record.id().to_string(),
+                        desc: record.desc().unwrap_or("").to_string(),
                         seq: record.seq().to_vec(),
                     });
                 }
