@@ -392,15 +392,25 @@ pub fn cli(cli: Cli) {
         Commands::Kml(command) => {
             create_directory(&command.output).unwrap();
             let meta = std::fs::metadata(&command.input).expect("Cannot read metadata.");
+            
+            // Si el input es un directorio, se procesan todos los archivos con un chunk único para cada uno.
             if meta.is_dir() {
-                for entry in std::fs::read_dir(&command.input).unwrap() {
-                    let path = entry.unwrap().path();
-                    // Utiliza el módulo `kml` en lugar de `counter`
+                let mut entries = std::fs::read_dir(&command.input).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .collect::<Vec<_>>();
+                entries.sort_by_key(|e| e.path()); // Orden consistente
+                let mut chunk_counter = 0;
+                for entry in entries {
+                    let path = entry.path();
                     let mut kml_processor = kml::CountComputer::new(
                         path.to_str().unwrap().to_owned(),
                         command.output.clone(),
                         command.k_size as usize,
                     );
+                    // Asignar un chunk único a cada archivo
+                    kml_processor.set_chunk(chunk_counter);
+                    chunk_counter += 1;
+                    
                     if command.threads > 0 {
                         kml_processor.set_threads(command.threads);
                     }
@@ -409,14 +419,16 @@ pub fn cli(cli: Cli) {
                     }
                     kml_processor.set_max_memory(command.memory as f64);
                     kml_processor.count();
-                    kml_processor.merge(true);
                 }
             } else {
+                // Si es un archivo único, asignamos chunk 0.
                 let mut kml_processor = kml::CountComputer::new(
-                    command.input,
-                    command.output,
+                    command.input.clone(),
+                    command.output.clone(),
                     command.k_size as usize,
                 );
+                kml_processor.set_chunk(0);
+                
                 if command.threads > 0 {
                     kml_processor.set_threads(command.threads);
                 }
@@ -425,8 +437,15 @@ pub fn cli(cli: Cli) {
                 }
                 kml_processor.set_max_memory(command.memory as f64);
                 kml_processor.count();
-                kml_processor.merge(true);
             }
+            
+            // Fusionar todos los archivos temporales en un solo archivo final
+            kml::merge_all(
+                &command.output,
+                command.k_size as usize,
+                command.acgt,
+                true, // Eliminar archivos temporales
+            );
         }
     }
 }

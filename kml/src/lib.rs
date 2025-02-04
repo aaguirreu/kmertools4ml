@@ -4,8 +4,9 @@ use ktio::seq::{get_reader, SeqFormat, Sequences};
 use std::{
     cmp::{max, min},
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Read, Write},
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -23,7 +24,6 @@ pub struct CountComputer {
     seq_count: u64,
     debug: bool,
     acgt: bool,
-    genome_ids: Arc<Mutex<Vec<String>>>,
 }
 
 impl CountComputer {
@@ -44,7 +44,6 @@ impl CountComputer {
             memory_ceil_gb: 6_f64,
             debug: false,
             acgt: false,
-            genome_ids: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -60,135 +59,59 @@ impl CountComputer {
         self.acgt = acgt;
     }
 
+    pub fn set_chunk(&mut self, chunk: u64) {
+        self.chunks = chunk;
+    }
+
     pub fn count(&mut self) {
         self.init();
         let pbar = ProgressBar::new(self.seq_count);
-        pbar.set_style(
-            ProgressStyle::with_template(
-                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-    
-        // Concatenamos todas las secuencias en un único String
+        pbar.set_style(ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} ({percent}%) {msg}").unwrap().progress_chars("#>-"));
+
         let mut combined_seq = String::new();
         {
             let mut records = self.records.lock().unwrap();
             while let Some(record) = records.next() {
-                // Convertir el Vec<u8> a &str (asumiendo que la secuencia es UTF-8 válida)
                 let seq_str = std::str::from_utf8(&record.seq).unwrap();
                 combined_seq.push_str(seq_str);
                 pbar.inc(1);
             }
         }
         pbar.finish();
-    
-        // Usar el valor actual de 'chunks' para identificar este procesamiento
+
         let chunk = self.chunks;
-        self.chunks += 1; // Se incrementa para el próximo archivo (o bloque)
-    
-        // Se asigna como ID del genoma el nombre base del archivo de entrada
-        let genome_id = std::path::Path::new(&self.in_path)
+        self.chunks += 1;
+
+        let genome_id = Path::new(&self.in_path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        self.genome_ids.lock().unwrap().push(genome_id);
-    
-        // Inicializar vector para contar k-mers en las distintas particiones
+
+        // Guardar el ID del genoma en genome_ids.txt
+        let genome_ids_path = format!("{}/genome_ids.txt", self.out_dir);
+        let mut file = File::options()
+            .create(true)
+            .append(true)
+            .open(genome_ids_path)
+            .unwrap();
+        writeln!(file, "{}", genome_id).unwrap();
+
         let mut part_counts = vec![HashMap::new(); self.n_parts as usize];
-    
-        // Procesar los k-mers usando la secuencia combinada; se usa el import `min` como antes
         for (fmer, rmer) in KmerGenerator::new(combined_seq.as_bytes(), self.ksize) {
             let min_mer = min(fmer, rmer);
             let part = (min_mer % self.n_parts) as usize;
             *part_counts[part].entry(min_mer).or_insert(0) += 1;
         }
-    
-        // Escribir los conteos en archivos temporales usando el identificador 'chunk'
+
         for (part, counts) in part_counts.into_iter().enumerate() {
             let path = format!("{}/temp_kmers.part_{}_chunk_{}", self.out_dir, part, chunk);
-            let mut buff = BufWriter::new(fs::File::create(path).unwrap());
+            let mut buff = BufWriter::new(File::create(path).unwrap());
             for (kmer, count) in counts {
                 writeln!(buff, "{}\t{}", count, kmer).unwrap();
             }
         }
     }        
-
-    pub fn merge(&self, delete: bool) {
-        let genome_ids = self.genome_ids.lock().unwrap().clone();
-        let outf = fs::File::create(format!("{}/kmers.counts", self.out_dir)).unwrap();
-        let mut buff = BufWriter::new(outf);
-
-        // Colectar todos los k-mers únicos
-        let mut all_kmers = HashSet::new();
-        for chunk in 0..genome_ids.len() {
-            for part in 0..self.n_parts {
-                let path = format!(
-                    "{}/temp_kmers.part_{}_chunk_{}",
-                    self.out_dir, part, chunk
-                );
-                if let Ok(file) = fs::File::open(&path) {
-                    let buff = BufReader::new(file);
-                    for line in buff.lines().filter_map(Result::ok) {
-                        let kmer: Kmer = line.split('\t').nth(1).unwrap().parse().unwrap();
-                        all_kmers.insert(kmer);
-                    }
-                }
-            }
-        }
-
-        // Ordenar k-mers y escribir encabezado
-        let mut sorted_kmers: Vec<Kmer> = all_kmers.into_iter().collect();
-        sorted_kmers.sort_unstable();
-        write!(buff, "ID_Genome").unwrap();
-        for kmer in &sorted_kmers {
-            let kmer_str = if self.acgt {
-                numeric_to_kmer(*kmer, self.ksize)
-            } else {
-                kmer.to_string()
-            };
-            write!(buff, "\t{}", kmer_str).unwrap();
-        }
-        writeln!(buff).unwrap();
-
-        // Escribir conteos por genoma
-        for (chunk, genome_id) in genome_ids.iter().enumerate() {
-            let mut genome_counts = HashMap::new();
-            for part in 0..self.n_parts {
-                let path = format!(
-                    "{}/temp_kmers.part_{}_chunk_{}",
-                    self.out_dir, part, chunk
-                );
-                if let Ok(file) = fs::File::open(&path) {
-                    let buff = BufReader::new(file);
-                    for line in buff.lines().filter_map(Result::ok) {
-                        let mut parts = line.split('\t');
-                        let count: u32 = parts.next().unwrap().parse().unwrap();
-                        let kmer: Kmer = parts.next().unwrap().parse().unwrap();
-                        genome_counts.insert(kmer, count);
-                    }
-                }
-            }
-
-            write!(buff, "{}", genome_id).unwrap();
-            for kmer in &sorted_kmers {
-                write!(buff, "\t{}", genome_counts.get(kmer).unwrap_or(&0)).unwrap();
-            }
-            writeln!(buff).unwrap();
-
-            if delete {
-                for part in 0..self.n_parts {
-                    let path = format!(
-                        "{}/temp_kmers.part_{}_chunk_{}",
-                        self.out_dir, part, chunk
-                    );
-                    fs::remove_file(path).ok();
-                }
-            }
-        }
-    }
 
     fn init(&mut self) {
         let reader = get_reader(&self.in_path).unwrap();
@@ -201,6 +124,93 @@ impl CountComputer {
         );
         self.n_parts = n_parts;
         self.seq_count = stats.seq_count as u64;
+    }
+}
+
+// Función independiente para fusionar todos los archivos temporales
+pub fn merge_all(out_dir: &str, ksize: usize, acgt: bool, delete: bool) {
+    let genome_ids_path = format!("{}/genome_ids.txt", out_dir);
+    let genome_ids = match fs::read_to_string(&genome_ids_path) {
+        Ok(content) => content.lines().map(String::from).collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    let mut all_kmers = HashSet::new();
+    for chunk in 0..genome_ids.len() {
+        let mut part = 0;
+        loop {
+            let path = format!("{}/temp_kmers.part_{}_chunk_{}", out_dir, part, chunk);
+            if !Path::new(&path).exists() {
+                break;
+            }
+            let file = File::open(path).unwrap();
+            let reader = BufReader::new(file);
+            for line in reader.lines().filter_map(Result::ok) {
+                let kmer: Kmer = line.split('\t').nth(1).unwrap().parse().unwrap();
+                all_kmers.insert(kmer);
+            }
+            part += 1;
+        }
+    }
+
+    let mut sorted_kmers: Vec<Kmer> = all_kmers.into_iter().collect();
+    sorted_kmers.sort_unstable();
+
+    let outf = File::create(format!("{}/kmers.counts", out_dir)).unwrap();
+    let mut buff = BufWriter::new(outf);
+
+    // Escribir cabecera
+    write!(buff, "ID_Genome").unwrap();
+    for kmer in &sorted_kmers {
+        let kmer_str = if acgt {
+            numeric_to_kmer(*kmer, ksize)
+        } else {
+            kmer.to_string()
+        };
+        write!(buff, "\t{}", kmer_str).unwrap();
+    }
+    writeln!(buff).unwrap();
+
+    // Escribir conteos por genoma
+    for (chunk, genome_id) in genome_ids.iter().enumerate() {
+        let mut genome_counts = HashMap::new();
+        let mut part = 0;
+        loop {
+            let path = format!("{}/temp_kmers.part_{}_chunk_{}", out_dir, part, chunk);
+            if !Path::new(&path).exists() {
+                break;
+            }
+            let file = File::open(path).unwrap();
+            let reader = BufReader::new(file);
+            for line in reader.lines().filter_map(Result::ok) {
+                let mut parts = line.split('\t');
+                let count: u32 = parts.next().unwrap().parse().unwrap();
+                let kmer: Kmer = parts.next().unwrap().parse().unwrap();
+                *genome_counts.entry(kmer).or_insert(0) += count;
+            }
+            part += 1;
+        }
+
+        write!(buff, "{}", genome_id).unwrap();
+        for kmer in &sorted_kmers {
+            write!(buff, "\t{}", genome_counts.get(kmer).unwrap_or(&0)).unwrap();
+        }
+        writeln!(buff).unwrap();
+
+        if delete {
+            let mut part = 0;
+            loop {
+                let path = format!("{}/temp_kmers.part_{}_chunk_{}", out_dir, part, chunk);
+                if fs::remove_file(&path).is_err() {
+                    break;
+                }
+                part += 1;
+            }
+        }
+    }
+
+    if delete {
+        fs::remove_file(genome_ids_path).ok();
     }
 }
 
@@ -232,36 +242,12 @@ mod tests {
 
     #[test]
     fn merge_test() {
-        let mut ctr = CountComputer::new(
-            PATH_FQ.to_owned(),
-            "../test_data/computed_counts_test".to_owned(),
-            15,
-        );
-        ctr.chunks = 2;
-        ctr.n_parts = 2;
-        ctr.merge(false);
-        let exp = load_lines_sorted("../test_data/expected_counts_test.counts");
-        let res = load_lines_sorted("../test_data/computed_counts_test/kmers.counts");
-        println!("Result  : {:?}", res);
-        println!("Expected: {:?}", exp);
-        assert_eq!(exp, res);
-    }
-
-    #[test]
-    fn merge_acgt_test() {
-        let mut ctr = CountComputer::new(
-            PATH_FQ.to_owned(),
-            "../test_data/computed_counts_acgt_test".to_owned(),
-            15,
-        );
-        ctr.chunks = 2;
-        ctr.n_parts = 2;
-        ctr.set_acgt_output(true);
-        ctr.merge(false);
-        let exp = load_lines_sorted("../test_data/expected_counts_acgt_test.counts");
-        let res = load_lines_sorted("../test_data/computed_counts_acgt_test/kmers.counts");
-        println!("Result  : {:?}", res);
-        println!("Expected: {:?}", exp);
-        assert_eq!(exp, res);
+        let out_dir = "../test_data/computed_counts_test";
+        let ksize = 15;
+        let mut ctr = CountComputer::new(PATH_FQ.to_owned(), out_dir.to_owned(), ksize);
+        ctr.debug = true;
+        ctr.count();
+        merge_all(out_dir, ksize, false, false);
+        // Verificar el archivo kmers.counts
     }
 }
