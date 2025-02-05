@@ -1,4 +1,3 @@
-```markdown
 # kmertools: DNA Vectorisation Tool (Fork with New KML Function)
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -36,7 +35,7 @@ To install `kmertools` (including the new KML functionality) from source, follow
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repository/kmertools.git
+git clone https://github.com/aaguirreu/kmertools4ml.git
 cd kmertools
 
 # Build the project in release mode
