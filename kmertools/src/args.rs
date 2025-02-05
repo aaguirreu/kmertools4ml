@@ -214,7 +214,7 @@ pub struct CounterCommand {
     pub output: String,
 
     /// k size for counting
-    #[arg(short, long, value_parser = clap::value_parser!(u64).range(10..32))]
+    #[arg(short, long, value_name = "K_SIZE", value_parser = clap::value_parser!(u64).range(2..32))]
     pub k_size: u64,
 
     /// Max memory in GB
@@ -244,7 +244,7 @@ pub struct KmlCommand {
     pub output: String,
 
     /// k size for counting
-    #[arg(short, long, value_parser = clap::value_parser!(u64).range(10..32))]
+    #[arg(short, long, value_name = "K_SIZE", value_parser = clap::value_parser!(u64).range(2..32))]
     pub k_size: u64,
 
     /// Max memory in GB
