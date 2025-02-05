@@ -74,38 +74,44 @@ impl CountComputer {
             .unwrap()
             .progress_chars("#>-"),
         );
-
-        let mut combined_seq = String::new();
+    
+        // Se inicializan las variables para almacenar el label y el chunk actual
         let mut label = String::new();
-        {
-            let mut records = self.records.lock().unwrap();
-            // Procesamos el primer registro para extraer el label
-            if let Some(record) = records.next() {
-                let seq_str = std::str::from_utf8(&record.seq).unwrap();
-                combined_seq.push_str(seq_str);
-                // Se asume que record.description y record.id existen
-                label = record.desc.replace(&record.id, "").trim().to_string();
-                pbar.inc(1);
-            }
-            // Los registros restantes se concatenan sin modificar el label
-            while let Some(record) = records.next() {
-                let seq_str = std::str::from_utf8(&record.seq).unwrap();
-                combined_seq.push_str(seq_str);
-                pbar.inc(1);
-            }
-        }
-        pbar.finish();
-
         let chunk = self.chunks;
         self.chunks += 1;
-
+    
         // Se obtiene el genome_id (por ejemplo, a partir del nombre del archivo)
         let genome_id = Path::new(&self.in_path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-
+    
+        // Se preparan los contenedores para los kmers, particionados según n_parts
+        let mut part_counts = vec![HashMap::new(); self.n_parts as usize];
+    
+        {
+            // Se bloquea el iterador de registros
+            let mut records = self.records.lock().unwrap();
+            // Procesar cada contig de forma individual
+            while let Some(record) = records.next() {
+                // Convertir la secuencia a &str
+                let seq_str = std::str::from_utf8(&record.seq).unwrap();
+                // Si aún no se ha asignado el label, usar el del primer registro
+                if label.is_empty() {
+                    label = record.desc.replace(&record.id, "").trim().to_string();
+                }
+                // Procesar este contig sin concatenarlo con otros
+                for (fmer, rmer) in KmerGenerator::new(seq_str.as_bytes(), self.ksize) {
+                    let min_mer = min(fmer, rmer);
+                    let part = (min_mer % self.n_parts) as usize;
+                    *part_counts[part].entry(min_mer).or_insert(0) += 1;
+                }
+                pbar.inc(1);
+            }
+        }
+        pbar.finish();
+    
         // Guardar el ID del genoma y el label en genome_ids.txt (separados por tabulador)
         let genome_ids_path = format!("{}/genome_ids.txt", self.out_dir);
         let mut file = File::options()
@@ -114,14 +120,8 @@ impl CountComputer {
             .open(genome_ids_path)
             .unwrap();
         writeln!(file, "{}\t{}", genome_id, label).unwrap();
-
-        let mut part_counts = vec![HashMap::new(); self.n_parts as usize];
-        for (fmer, rmer) in KmerGenerator::new(combined_seq.as_bytes(), self.ksize) {
-            let min_mer = min(fmer, rmer);
-            let part = (min_mer % self.n_parts) as usize;
-            *part_counts[part].entry(min_mer).or_insert(0) += 1;
-        }
-
+    
+        // Escribir los resultados parciales en archivos temporales para cada partición
         for (part, counts) in part_counts.into_iter().enumerate() {
             let path = format!("{}/temp_kmers.part_{}_chunk_{}", self.out_dir, part, chunk);
             let mut buff = BufWriter::new(File::create(path).unwrap());
@@ -129,7 +129,7 @@ impl CountComputer {
                 writeln!(buff, "{}\t{}", count, kmer).unwrap();
             }
         }
-    }
+    }    
 
     fn init(&mut self) {
         let reader = get_reader(&self.in_path).unwrap();
