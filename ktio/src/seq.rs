@@ -75,14 +75,19 @@ impl<R: BufRead> Sequences<R> {
             SeqFormat::Fastq => {
                 let fastq_reader = FastqReader::new(reader);
                 for record in fastq_reader.records() {
-                    total_length += record.unwrap().seq().len();
-                    seq_count += 1;
+                    match record {
+                        Ok(rec) => total_length += rec.seq().len(),
+                        Err(e) => eprintln!("Error reading record: {}", e),
+                    }                    seq_count += 1;
                 }
             }
             SeqFormat::Fasta => {
                 let fasta_reader = FastaReader::new(reader);
                 for record in fasta_reader.records() {
-                    total_length += record.unwrap().seq().len();
+                    match record {
+                        Ok(rec) => total_length += rec.seq().len(),
+                        Err(e) => eprintln!("Error reading record: {}", e),
+                    }
                     seq_count += 1;
                 }
             }
@@ -105,7 +110,13 @@ impl<R: BufRead> Iterator for Sequences<R> {
             RecordSet::Fastq(ref mut records) => {
                 let next_record = records.next();
                 if let Some(record) = next_record {
-                    let record = record.unwrap();
+                    let record = match record {
+                        Ok(rec) => rec,
+                        Err(e) => {
+                            eprintln!("Error reading record: {}", e);
+                            return self.next();
+                        }
+                    };
                     self.current_record += 1;
                     return Some(Sequence {
                         n: self.current_record - 1,
@@ -119,7 +130,13 @@ impl<R: BufRead> Iterator for Sequences<R> {
             RecordSet::Fasta(ref mut records) => {
                 let next_record = records.next();
                 if let Some(record) = next_record {
-                    let record = record.unwrap();
+                    let record = match record {
+                        Ok(rec) => rec,
+                        Err(e) => {
+                            eprintln!("Error reading record: {}", e);
+                            return self.next();
+                        }
+                    };
                     self.current_record += 1;
                     return Some(Sequence {
                         n: self.current_record - 1,
@@ -144,8 +161,10 @@ impl<R: BufRead> Iterator for Sequences<R> {
 pub fn get_reader(path: &str) -> Result<BufReader<Box<dyn Read + Sync + Send>>, String> {
     if path == "-" {
         let stdin = io::stdin();
+        // println!("Reading from standard input...");
         Ok(BufReader::new(Box::new(stdin)))
-    } else {
+        } else {
+        // println!("Reading file: {}", path); // Here the file name is printed
         let is_zip = path.ends_with(".gz");
         let file = File::open(path).map_err(|_| format!("Unable to open: {}", path))?;
         if is_zip {

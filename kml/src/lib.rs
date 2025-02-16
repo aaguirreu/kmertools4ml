@@ -99,7 +99,11 @@ impl CountComputer {
                 let seq_str = std::str::from_utf8(&record.seq).unwrap();
                 // Si aún no se ha asignado el label, usar el del primer registro
                 if label.is_empty() {
-                    label = record.desc.replace(&record.id, "").trim().to_string();
+                    label = if record.desc.trim().is_empty() {
+                        "".to_string()
+                    } else {
+                        record.desc.replace(&record.id, "").trim().to_string()
+                    };
                 }
                 // Procesar este contig sin concatenarlo con otros
                 for (fmer, rmer) in KmerGenerator::new(seq_str.as_bytes(), self.ksize) {
