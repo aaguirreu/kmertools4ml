@@ -549,6 +549,7 @@ dependencies = [
  "composition",
  "counter",
  "coverage",
+ "indicatif",
  "kml",
  "ktio",
  "misc",

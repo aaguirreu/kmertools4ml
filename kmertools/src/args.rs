@@ -243,6 +243,10 @@ pub struct KmlCommand {
     #[arg(short, long)]
     pub output: String,
 
+    /// Temporary directory path (defaults to output directory)
+    #[arg(short = 'T', long)]
+    pub temp_dir: Option<String>,
+
     /// k size for counting
     #[arg(short, long, value_name = "K_SIZE", value_parser = clap::value_parser!(u64).range(2..32))]
     pub k_size: u64,
@@ -390,62 +394,94 @@ pub fn cli(cli: Cli) {
             ctr.merge(true);
         }
         Commands::Kml(command) => {
+            // Asegurarse de que el directorio de salida exista
             create_directory(&command.output).unwrap();
-            let meta = std::fs::metadata(&command.input).expect("Cannot read metadata.");
-            
-            // Si el input es un directorio, se procesan todos los archivos con un chunk único para cada uno.
+            if let Some(temp_dir) = &command.temp_dir {
+                create_directory(temp_dir).unwrap();
+            }
+            let meta = std::fs::metadata(&command.input)
+                .expect("Cannot read metadata.");
+        
+            // Vector global para acumular todos los GenomeResult (chunks) de cada archivo
+            let mut genome_results: Vec<kml::GenomeResult> = Vec::new();
+        
             if meta.is_dir() {
-                let mut entries = std::fs::read_dir(&command.input).unwrap()
+                // Procesar todos los archivos del directorio
+                let mut entries = std::fs::read_dir(&command.input)
+                    .unwrap()
                     .filter_map(|entry| entry.ok())
                     .collect::<Vec<_>>();
                 entries.sort_by_key(|e| e.path()); // Orden consistente
+        
+                // Barra de progreso global (controlada aquí)
+                let pbar = indicatif::ProgressBar::new(entries.len() as u64);
+                pbar.set_style(
+                    indicatif::ProgressStyle::with_template(
+                        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} ({percent}%) {msg}"
+                    )
+                    .unwrap()
+                    .progress_chars("#>-"),
+                );
+        
                 let mut chunk_counter = 0;
                 for entry in entries {
                     let path = entry.path();
-                    let mut kml_processor = kml::CountComputer::new(
+                    let mut processor = kml::CountComputer::new(
                         path.to_str().unwrap().to_owned(),
                         command.output.clone(),
                         command.k_size as usize,
                     );
-                    // Asignar un chunk único a cada archivo
-                    kml_processor.set_chunk(chunk_counter);
+                    // Asignar un chunk único a cada archivo (o se puede reiniciar según se requiera)
+                    processor.set_chunk(chunk_counter);
                     chunk_counter += 1;
-                    
+        
                     if command.threads > 0 {
-                        kml_processor.set_threads(command.threads);
+                        processor.set_threads(command.threads);
                     }
                     if command.acgt {
-                        kml_processor.set_acgt_output(true);
+                        processor.set_acgt_output(true);
                     }
-                    kml_processor.set_max_memory(command.memory as f64);
-                    kml_processor.count();
+                    processor.set_max_memory(command.memory as f64);
+                    
+                    // Set temporary directory if specified
+                    if let Some(temp_dir) = &command.temp_dir {
+                        processor.set_temp_dir(temp_dir.clone());
+                    }
+
+                    // Procesar el archivo en chunks, cada uno se "flushea" cuando se alcanza el límite de RAM
+                    let chunks = processor.count_with_chunks();
+                    genome_results.extend(chunks);
+                    pbar.inc(1);
                 }
+                pbar.finish();
             } else {
-                // Si es un archivo único, asignamos chunk 0.
-                let mut kml_processor = kml::CountComputer::new(
+                // Procesar un único archivo
+                let mut processor = kml::CountComputer::new(
                     command.input.clone(),
                     command.output.clone(),
                     command.k_size as usize,
                 );
-                kml_processor.set_chunk(0);
-                
+                processor.set_chunk(0);
                 if command.threads > 0 {
-                    kml_processor.set_threads(command.threads);
+                    processor.set_threads(command.threads);
                 }
                 if command.acgt {
-                    kml_processor.set_acgt_output(true);
+                    processor.set_acgt_output(true);
                 }
-                kml_processor.set_max_memory(command.memory as f64);
-                kml_processor.count();
+                processor.set_max_memory(command.memory as f64);
+                
+                // Set temporary directory if specified
+                if let Some(temp_dir) = &command.temp_dir {
+                    processor.set_temp_dir(temp_dir.clone());
+                }
+
+                let chunks = processor.count_with_chunks();
+                genome_results.extend(chunks);
             }
-            
-            // Fusionar todos los archivos temporales en un solo archivo final
-            kml::merge_all(
-                &command.output,
-                command.k_size as usize,
-                command.acgt,
-                true, // Eliminar archivos temporales
-            );
+        
+            // Fusionar todos los resultados acumulados (chunks) y generar el archivo final kmers.counts
+            kml::merge_all(genome_results, &command.output, command.k_size as usize, command.acgt);
         }
+        
     }
 }

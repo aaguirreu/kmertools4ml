@@ -163,6 +163,8 @@ impl CountComputer {
                         buff.write_all(format!("{}\t{:?}\n", k, v).as_bytes())
                             .unwrap();
                     });
+                    // Explicitly flush the buffer to ensure all data is written to disk
+                    buff.flush().unwrap();
                 })
         });
 
